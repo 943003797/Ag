@@ -1,0 +1,410 @@
+import json, os, shutil
+import math
+from mutagen import File
+from mutagen.wave import WAVE
+from moviepy import AudioFileClip
+from src.tts.cosyvoice.tts import TTS
+from src.ai_models.big_model.llm import LLM
+from src.vector.vectordb import VectorDB
+from src.ai_models.ali_model.reRank import v5_reRank
+
+def get_audio_duration(audio_path):
+    """
+    获取音频文件的时长（秒）
+    
+    Args:
+        audio_path (str): 音频文件路径
+        
+    Returns:
+        int: 音频时长（秒），不足一秒则向上取整
+    """
+    try:
+        if not os.path.exists(audio_path):
+            return None
+        
+        # 首先尝试使用 mutagen.File（支持多种格式）
+        try:
+            audio = File(audio_path)
+            if audio is not None and hasattr(audio, 'info') and hasattr(audio.info, 'length'):
+                duration = audio.info.length
+                return math.ceil(duration)
+        except Exception as e:
+            print(f"使用 mutagen.File 获取时长失败: {e}")
+        
+        # 如果 mutagen.File 失败，尝试使用 WAVE 类
+        try:
+            audio = WAVE(audio_path)
+            duration = audio.info.length
+            return math.ceil(duration)
+        except Exception as e:
+            print(f"使用 WAVE 获取时长失败: {e}")
+        
+        return None
+    except Exception as e:
+        print(f"获取音频时长失败: {e}")
+        return None
+
+def match_video(wenan: str, video_content: list) -> str:
+    """
+    根据文案内容匹配对应的视频内容（单个）
+    
+    Args:
+        text (str): 输入的文案内容
+        video_content (list): 视频内容列表
+        
+    Returns:
+        str: 匹配到的视频内容，若未匹配到则返回空字符串
+    """
+    llm = LLM()
+    index = llm.match_video(wenan=wenan, video_content=video_content)
+    return int(index)
+
+def match_multiple_videos(text: str, audio_length: int, n_results: int = 50) -> list:
+    """
+    根据文案内容匹配多个候选视频文件路径
+    
+    Args:
+        text (str): 输入的文案内容
+        audio_length (int): 音频文件的时长（秒）
+        n_results (int): 返回的视频数量，默认为50
+        
+    Returns:
+        list: 匹配到的视频文件信息列表，每个元素包含file_name和score等信息
+    """
+    try:
+        vector_db = VectorDB(collection_name="video", db_path="./Vector/db/video")
+        where = {"duration": audio_length}
+        where = {
+            "duration": {
+                "$gt": audio_length - 1
+            }
+        }
+        results = vector_db.search(query_text=text, n_results=n_results, where=where)
+        # print(f"[DEBUG] vector_db.search_results metadatas: {results['metadatas']}")
+        
+        video_list = []
+        
+        # 处理搜索结果
+        if isinstance(results, dict):
+            if results and "metadatas" in results and results["metadatas"] and len(results["metadatas"]) > 0:
+                ids = results["ids"][0]
+                for i, metadata_list in enumerate(results["metadatas"]):
+                    for key, metadata in enumerate(metadata_list):
+                        video_info = {
+                            "file_name": metadata.get("fileName", ""),
+                            "score": results.get("distances", [[]])[0][i] if results.get("distances") and len(results.get("distances", [])) > 0 and len(results.get("distances")[0]) > i else 0,
+                            "duration": metadata.get("duration", ""),
+                            "file_path": f"{os.getenv('VIDEO_HOUSE')}{metadata.get('fileName', '')}",
+                            "content": metadata.get("content", ""),
+                            "id": ids[key]
+                        }
+                        video_list.append(video_info)
+                        if len(video_list) >= n_results:
+                            break
+                    if len(video_list) >= n_results:
+                        break
+                video_list = v5_reRank(text, video_list)
+        # 如果 results 是字符串格式，尝试解析
+        elif isinstance(results, str):
+            try:
+                results_dict = json.loads(results)
+                if results_dict and "metadatas" in results_dict and results_dict["metadatas"] and len(results_dict["metadatas"]) > 0:
+                    for i, metadata_list in enumerate(results_dict["metadatas"]):
+                        for metadata in metadata_list:
+                            video_info = {
+                                "file_name": metadata.get("fileName", ""),
+                                "score": results_dict.get("distances", [[]])[0][i] if results_dict.get("distances") and len(results_dict.get("distances", [])) > 0 and len(results_dict.get("distances")[0]) > i else 0,
+                                "duration": metadata.get("duration", ""),
+                                "file_path": f"{os.getenv('VIDEO_HOUSE')}{metadata.get('fileName', '')}",
+                                "content": metadata.get("content", "")
+                            }
+                            video_list.append(video_info)
+                            if len(video_list) >= n_results:
+                                break
+                        if len(video_list) >= n_results:
+                            break
+            except json.JSONDecodeError:
+                print(f"[ERROR] 解析搜索结果时出错: {results}")
+            except Exception as e:
+                print(f"[ERROR] 处理搜索结果时出错: {e}")
+        
+        print(f"[DEBUG] 匹配到 {len(video_list)} 个视频文件")
+        return video_list
+        
+    except Exception as e:
+        print(f"[ERROR] 匹配视频时出错: {e}")
+        return []
+
+def format_content(content):
+    """
+    将传入的文案格式化为结构化数据
+    
+    Args:
+        content (str): 待格式化的文案内容
+        
+    Returns:
+        list: 包含多个字典的列表，每个字典包含id、text、audio_length、video_path、audio_patch
+    """
+    if not content or not content.strip():
+        return []
+    
+    # 按行分割文案，去除空行和空白字符
+    lines = content.strip().split('\n')
+    sentences = []
+    
+    for line in lines:
+        line = line.strip()
+        if line:  # 非空行
+            sentences.append(line)
+    
+    # 构建结构化数据
+    structured_data = []
+    for i, sentence in enumerate(sentences, 1):
+        structured_data.append({
+            'id': i,
+            'text': sentence,
+            'audio_length': None,  # 留空，等待后续处理
+            'video_path': '',       # 留空，等待后续处理
+            'audio_patch': ''       # 留空，等待后续处理
+        })
+    
+    return structured_data
+
+def copy_base_draft_to_draft(topic_name):
+    """
+    复制material/baseDraft到目标目录
+    
+    Args:
+        topic_name (str): 主题名称（从输入框获取）
+        
+    Returns:
+        bool: 是否复制成功
+    """
+    try:
+        source_path = "material/baseDraft"
+        target_dir = f"draft/JianyingPro Drafts/{topic_name}"
+        
+        # 确保目标目录存在
+        os.makedirs(target_dir, exist_ok=True)
+        
+        # 复制整个baseDraft目录
+        if os.path.exists(source_path):
+            if os.path.exists(target_dir):
+                shutil.rmtree(target_dir)  # 如果目标目录存在，先删除
+            shutil.copytree(source_path, target_dir)
+            return True
+        else:
+            return False
+    except Exception as e:
+        print(f"复制失败: {e}")
+        return False
+
+def generate_voice_for_content(formatted_json_str, topic_name, voice_id="风吟"):
+    """
+    为格式化的文案内容生成配音
+    
+    Args:
+        formatted_json_str (str): 格式化后的JSON字符串
+        topic_name (str): 主题名称
+        voice_id (str): 音色ID，默认"风吟"
+        
+    Returns:
+        dict: 包含配音结果的状态信息
+    """
+    try:
+        # 解析JSON字符串
+        structured_data = json.loads(formatted_json_str)
+        if not structured_data:
+            return {"status": "error", "message": "没有有效的文案内容"}
+        
+        # 确保目标目录存在
+        target_dir = f"draft/JianyingPro Drafts/{topic_name}/Resources/audioAlg"
+        os.makedirs(target_dir, exist_ok=True)
+        
+        # 初始化TTS
+        tts = TTS(voice_id="刘涛慢速", speech_rate=1.1)
+        
+        results = []
+        success_count = 0
+        total_count = len(structured_data)
+        
+        for item in structured_data:
+            sentence_id = item['id']
+            text = item['text']
+            audio_filename = f"{sentence_id}.wav"
+            
+            try:
+                # 生成音频文件
+                print(f"尝试生成音频文件: {text}")
+                audio_path = os.path.join(target_dir, audio_filename)
+                success = tts.textToAudio(text=text, out_path=audio_path)
+                
+                if success:
+                    results.append({
+                        "id": sentence_id,
+                        "text": text,
+                        "audio_path": audio_path,
+                        "status": "success"
+                    })
+                    success_count += 1
+                else:
+                    results.append({
+                        "id": sentence_id,
+                        "text": text,
+                        "audio_path": None,
+                        "status": "failed"
+                    })
+            except Exception as e:
+                results.append({
+                    "id": sentence_id,
+                    "text": text,
+                    "audio_path": None,
+                    "status": "error",
+                    "error": str(e)
+                })
+        # 更新结构化数据中的audio_length、video_path和audio_patch
+        for result in results:
+            for item in structured_data:
+                if item['id'] == result['id']:
+                    if result['status'] == 'success':
+                        # 获取音频时长
+                        audio_length = get_audio_duration(result['audio_path'])
+                        item['audio_length'] = audio_length if audio_length is not None else None
+                        item['video_path'] = result['audio_path']
+                        # 更新audio_patch为音频文件名（相对路径）
+                        item['audio_patch'] = os.path.basename(result['audio_path'])
+                    break
+        #生成拼接音频
+        if success_count > 0:
+            sorted_data = sorted(structured_data, key=lambda x: x['id'])
+            audio_clips = []
+            for item in sorted_data:
+                if item.get('audio_patch') and item.get('video_path'):
+                    audio_path = os.path.join(target_dir, item['audio_patch'])
+                    if os.path.exists(audio_path):
+                        try:
+                            clip = AudioFileClip(audio_path)
+                            audio_clips.append(clip)
+                        except Exception as e:
+                            print(f"加载音频文件失败 {audio_path}: {e}")
+            
+            if audio_clips:
+                try:
+                    output_path = os.path.join(target_dir, "wenan.wav")
+                    
+                    if len(audio_clips) == 1:
+                        audio_clips[0].write_audiofile(output_path, logger=None)
+                    else:
+                        import wave
+                        
+                        file_list = [clip.filename for clip in audio_clips]
+                        
+                        with wave.open(file_list[0], 'rb') as first:
+                            nchannels = first.getnchannels()
+                            sampwidth = first.getsampwidth()
+                            framerate = first.getframerate()
+                            all_frames = first.readframes(first.getnframes())
+                        
+                        for file in file_list[1:]:
+                            with wave.open(file, 'rb') as f:
+                                if f.getnchannels() != nchannels or f.getsampwidth() != sampwidth or f.getframerate() != framerate:
+                                    print(f"警告: 音频参数不一致！参考文件: {file_list[0]}, 当前文件: {file}")
+                                    continue
+                                all_frames += f.readframes(f.getnframes())
+                        
+                        with wave.open(output_path, 'wb') as output:
+                            output.setnchannels(nchannels)
+                            output.setsampwidth(sampwidth)
+                            output.setframerate(framerate)
+                            output.writeframes(all_frames)
+                    
+                    print(f"拼接音频已保存到: {output_path}")
+                except Exception as e:
+                    print(f"拼接音频失败: {e}")
+        
+        # 返回结果
+        return {
+            "status": "completed",
+            "message": f"配音完成！成功生成 {success_count}/{total_count} 个音频文件",
+            "results": results,
+            "updated_data": structured_data,
+            "target_directory": target_dir
+        }
+        
+    except json.JSONDecodeError as e:
+        return {"status": "error", "message": f"JSON解析错误: {e}"}
+    except Exception as e:
+        return {"status": "error", "message": f"配音生成失败: {e}"}
+
+def process_complete_workflow(content, topic_name, voice_id="风吟"):
+    """
+    完整的配音工作流程：格式化文案 + 复制目录 + 生成配音
+    
+    Args:
+        content (str): 原始文案内容
+        topic_name (str): 主题名称
+        voice_id (str): 音色ID
+        
+    Returns:
+        dict: 完整的工作流结果
+    """
+    try:
+        # 1. 格式化文案
+        structured_data = format_content(content)
+        if not structured_data:
+            return {"status": "error", "message": "没有有效的文案内容"}
+        
+        # 转换为JSON字符串
+        formatted_json_str = json.dumps(structured_data, ensure_ascii=False, indent=2)
+        
+        # 2. 复制baseDraft到目标目录
+        copy_success = copy_base_draft_to_draft(topic_name)
+        if not copy_success:
+            return {"status": "error", "message": "复制baseDraft失败"}
+        
+        # 3. 生成配音
+        voice_result = generate_voice_for_content(formatted_json_str, topic_name, voice_id)
+        
+        return {
+            "status": "success",
+            "formatted_data": structured_data,
+            "formatted_json": formatted_json_str,
+            "copy_result": {"success": copy_success},
+            "voice_result": voice_result
+        }
+
+        
+    except Exception as e:
+        return {"status": "error", "message": f"工作流执行失败: {e}"}
+
+def delete_video(video_id: str = '', video_file_path: str = ''):
+    """
+    删除指定路径的视频文件。
+    
+    Args:
+        video_path (str): 视频文件的路径
+        
+    Returns:
+        bool: 如果删除成功则返回True，否则返回False
+    """
+    # 检查视频ID是否为空
+    if not video_id:
+        print("[ERROR] 视频ID不能为空")
+        return False
+    vector_db = VectorDB(collection_name="video", db_path="./Vector/db/video")
+    # 删除视频ID
+    delete_result = vector_db.delete_document(document_id=video_id)
+    if not delete_result:
+        print(f"[ERROR] 视频ID {video_id} 删除失败")
+        return False
+    print(f"[DEBUG] 视频ID {video_id} 删除成功")
+    # 删除视频文件
+    if video_file_path and os.path.exists(video_file_path):
+        try:
+            os.remove(video_file_path)
+            print(f"[DEBUG] 视频文件 {video_file_path} 删除成功")
+        except Exception as e:
+            print(f"[ERROR] 删除视频文件 {video_file_path} 失败: {e}")
+            # 统一返回：文件删除失败也视为整体失败
+            return False
+    return True
