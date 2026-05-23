@@ -109,7 +109,7 @@ class autoCut():
       self.script.add_segment(border_segment, 'Border')
 
     def addWaterMark(self):
-        WaterMark_Segment = draft.TextSegment("和光同尘", trange(0, self.duration),  # 文本将持续整个视频（注意script.duration在上方片段添加到轨道后才会自动更新）
+        WaterMark_Segment = draft.TextSegment("苏雨听风", trange(0, self.duration),  # 文本将持续整个视频（注意script.duration在上方片段添加到轨道后才会自动更新）
                                     font=draft.FontType.三极行楷简体_粗,                                  # 设置字体为文轩体
                                     style=draft.TextStyle(color=(1, 1, 1)),                # 设置字体颜色为黄色
                                     border=draft.TextBorder(alpha=1,color=(0.172549, 0.184313, 0.231372),width=20),
@@ -124,7 +124,7 @@ class autoCut():
                                     font=draft.FontType.三极行楷简体_粗,                                  # 设置字体为文轩体
                                     style=draft.TextStyle(color=(1, 0.870588, 0)),                # 设置字体颜色为黄色
                                     border=draft.TextBorder(alpha=0.2,color=(0.172549, 0.184313, 0.231372)),
-                                    clip_settings=draft.ClipSettings(transform_x=0.765,transform_y=0.90, scale_x=0.45, scale_y=0.45))          # 模拟字幕的位置
+                                    clip_settings=draft.ClipSettings(transform_x=-0.805,transform_y=0.90, scale_x=0.45, scale_y=0.45))          # 模拟字幕的位置
         TopicSegment.add_animation(TextIntro.冰雪飘动, 1500000)
         TopicSegment.add_animation(TextOutro.渐隐, 500000)
         self.script.add_segment(TopicSegment, 'Topic')
@@ -487,8 +487,8 @@ class autoCut():
         try:
             self.addVideo()
             self.addAudio()
-            # self.addBorder()
-            # self.addWaterMark()
+            self.addBorder()
+            self.addWaterMark()
             self.addTopic()
             self.addBgm()
             self.addSubtitle()
